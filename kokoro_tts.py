@@ -4,9 +4,14 @@ kokoro_tts.py — Text-to-speech via Kokoro-82M.
 
 Lazily loads the model on first call. ~7s cold start, then fast.
 Returns WAV bytes (24kHz mono PCM) ready to stream or send.
+
+The voice can be overridden at runtime via the AVA_TTS_VOICE env var.
+Other options: af_heart, bf_emma, am_michael, etc.
 """
 import io
 import logging
+import os
+import tempfile
 import threading
 import time
 
@@ -14,16 +19,12 @@ import numpy as np
 import soundfile as sf
 from kokoro import KPipeline
 
-log = logging.getLogger("sam.voice.tts")
+log = logging.getLogger("ava.tts.kokoro")
 
 _pipeline = None
 _lock = threading.Lock()
 
-DEFAULT_VOICE = "am_adam"  # default male voice. Other options: af_heart, bf_emma, am_michael
-# sam-voice can switch providers at runtime via env SAM_VOICE_TTS_PROVIDER. We default to Kokoro
-# for low-latency local synthesis. The "regular Sam voice" you hear in Hermes chat
-# (text_to_speech tool) is Edge TTS en-US-AriaNeural — that path is available via
-# provider="edge" if you set SAM_VOICE_TTS_PROVIDER=edge.
+DEFAULT_VOICE = os.environ.get("AVA_TTS_VOICE", "am_adam")  # default male voice
 
 
 def _get_pipeline():
@@ -87,10 +88,13 @@ def synth_to_pcm_bytes(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
     print("=== testing kokoro_tts.synth_to_wav_bytes ===")
-    wav = synth_to_wav_bytes("Hello Justin. This is sam-voice. Voice synthesis is working.")
+    wav = synth_to_wav_bytes("Hello. This is a voice synthesis test. If you can hear this, it works.")
     print(f"  produced {len(wav)} bytes of WAV")
     assert len(wav) > 1000
-    with open("/tmp/sam-voice-test/kokoro_test.wav", "wb") as f:
-        f.write(wav)
-    print(f"  saved to /tmp/sam-voice-test/kokoro_test.wav")
+    # Save to a temp file (auto-cleaned at process exit) — never write to /tmp/...
+    # with a project-specific name; use tempfile so multi-instance runs don't collide.
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, prefix="ava-kokoro-test-") as tf:
+        tf.write(wav)
+        tmp_path = tf.name
+    print(f"  saved to {tmp_path}")
     print("  PASS")

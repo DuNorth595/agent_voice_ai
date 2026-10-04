@@ -2,8 +2,8 @@
 Telegram context sync for voice-bridge.
 
 Polls Telegram updates for context the voice assistant needs:
-- Recent home-channel messages (so voice Sam knows what was just sent)
-- Recent DM messages from Justin (so voice Sam knows what's on his mind)
+- Recent home-channel messages (so the voice agent knows what was just sent)
+- Recent DM messages from the user (so the voice agent knows what's on their mind)
 
 Two surfaces:
   sync_home_context(limit=5)  -> str    formatted block for system prompt

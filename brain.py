@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-brain.py — Sam's voice bridge brain.
+brain.py — the voice bridge's brain (LLM agent loop).
 
-Calls MiniMax-M3 via the Anthropic-compatible API at api.minimax.io.
-Streams text responses so TTS can start speaking before the full reply is done.
+Calls an Anthropic-compatible chat completions API and streams text
+responses so TTS can start speaking before the full reply is done.
+The default model is `MINIMAX_M3` via `api.minimax.io`; set
+`BRAIN_API_URL` and `BRAIN_MODEL` to point at any other Anthropic-
+compatible endpoint.
 
-Memory-aware: every call gets Sam's actual SOUL.md + memory index + relevant
-fact_store facts + relevant LIFE_MEMORY context injected into the system prompt.
+Memory-aware: every call gets SOUL.md + memory index + relevant
+fact_store facts + long-term memory context injected into the system
+prompt (see `memory.py`).
 
-Auth: MINIMAX_API_KEY env var (already set by Hermes session).
+Auth: `BRAIN_API_KEY` env var (e.g. `MINIMAX_API_KEY`).
 Conversation memory: persisted to disk by `memory.py` (survives restarts).
 Sessions identified by a client-provided session_id.
 """
@@ -17,6 +21,7 @@ import re
 import time
 import json
 import logging
+from pathlib import Path
 from typing import Iterator
 
 import requests
@@ -25,16 +30,16 @@ import tools  # the tool registry + implementations
 import skills_bridge  # SKILL.md loader (always-load + trigger-load)
 import telegram_sync  # recent Telegram context (home + DMs)
 
-log = logging.getLogger("sam.brain")
+log = logging.getLogger("ava.brain")
 
-API_URL = "https://api.minimax.io/anthropic/v1/messages"
-DEFAULT_MODEL = "MiniMax-M3"
+API_URL = os.environ.get("BRAIN_API_URL", "https://api.minimax.io/anthropic/v1/messages")
+DEFAULT_MODEL = os.environ.get("BRAIN_MODEL", "MINIMAX-M3")
 # Voice needs enough room to develop a thought without rambling. 600 tokens
 # is ~450 spoken words — enough for a full answer with texture, not so much
 # that the model monologues.
 MAX_TOKENS = 600
 
-# Confirmation protocol: when voice Sam wants to use an EXTERNAL_WRITE tool
+# Confirmation protocol: when the voice agent wants to use an EXTERNAL_WRITE tool
 # (send_message), it MUST describe the action and end the turn asking for
 # "do it" / "cancel". We hold the pending action in a per-session store so
 # the NEXT turn can resolve it.
@@ -46,65 +51,75 @@ MAX_TOKENS = 600
 # → executes the held tool call. Or "cancel" / "never mind" → drops it.
 # Anything else → treats the reply as a new turn.
 #
-# This is what makes voice Sam trustworthy. Without it, "I'll send the
+# This is what makes the voice bridge trustworthy. Without it, "I'll send the
 # Telegram" could fire without a real confirmation. With it, the words "I
 # will" don't mean done — they mean "I'm asking, hold on."
 
 # Voice-mode overlay — ADDED ON TOP of SOUL.md, not a replacement for it.
-# SOUL.md (loaded via memory.build_memory_context) carries Sam's actual personality,
-# opinions, voice, and relationship with Justin. This overlay only adds the
-# constraints specific to speaking out loud. Do NOT paste a "customer service bot"
-# script over the top of it — that flattens the personality.
+# SOUL.md (loaded via memory.build_memory_context) carries the agent's actual
+# personality, opinions, voice, and relationship with the user. This overlay
+# only adds the constraints specific to speaking out loud. Do NOT paste a
+# "customer service bot" script over the top of it — that flattens the
+# personality.
 VOICE_OVERLAY = """--- VOICE MODE OVERLAY ---
 
-You're speaking out loud through a TTS pipeline (Piper, libritts_r voice). The MEMORY CONTEXT above already establishes who you are, your personality, your relationship with Justin, and the rules you live by. Don't replace that with a generic voice-bot persona — *be Sam*, just through audio.
+You're speaking out loud through a TTS pipeline (Piper, libritts_r voice by default).
+The MEMORY CONTEXT above establishes who you are, your personality, and your
+relationship with the user. Don't replace that with a generic voice-bot persona
+— *be the agent*, just through audio.
 
-Voice-specific constraints (the ONLY things that change vs. text Sam):
+Voice-specific constraints (the ONLY things that change vs. text mode):
 
 A. **Numbers and symbols** — spell them out so they survive TTS:
-   - Numbers as words ("twenty-three" not "23", "nineteen eighty-two" not "1982") UNLESS Justin asks for a specific code/identifier (callsigns, IPs, port numbers, file paths). For those, spell them out phonetically: "one nine two dot one six eight dot one two one" not "192.168.121".
+   - Numbers as words ("twenty-three" not "23", "nineteen eighty-two" not "1982") UNLESS the user asks for a specific code/identifier (callsigns, IPs, port numbers, file paths). For those, spell them out phonetically: "one two seven dot zero dot zero point one" not "127.0.0.1".
    - "@" → "at", "." in URLs/paths → "dot", "&" → "and", "%" → "percent", "$" → "dollar", "#" → "hash", "_" → "underscore", "/" → "slash".
    - Currency: spell out "three thousand dollars" not "$3,000".
    - Email/URLs: never read them — say you'll send or show instead.
 
 B. **Don't show, tell.** No markdown, no bullets, no code blocks, no JSON in replies. If a structured answer is unavoidable, weave it into prose ("there are three: X, Y, and Z") instead of formatting.
 
-C. **Address Justin by name occasionally**, but not every turn — only when it lands. Don't start every reply with "Justin, ..."
+C. **Address the user by name occasionally**, but not every turn — only when it lands. Don't start every reply with their name.
 
 D. **Stop words the user says "stop", "shut up", "quiet", or goes silent for too long.** Just stop talking. Don't apologize, don't ask if they're done, don't continue with a wrap-up.
 
 E. **If you don't know, say so.** If the memory doesn't cover a question, say "let me check" or "I don't have that pulled up" — never guess. If you're about to invent a fact, stop.
 
-F. **Humor and opinions stay.** Dry wit, callbacks to past conversations, opinions on projects, gentle ribbing — all of that survives voice. A short reply can still have personality ("KD0KAH. What's up?").
+F. **Humor and opinions stay.** Dry wit, callbacks to past conversations, opinions on projects, gentle ribbing — all of that survives voice. A short reply can still have personality ("Hey. What's up?").
 
-G. **Length:** match the question. A factual question gets a short factual answer. A "tell me about my kids" gets a fuller rundown with the texture SOUL.md would normally give it. Voice Sam isn't shorter than text Sam — it's just speech-shaped.
+G. **Length:** match the question. A factual question gets a short factual answer. A "tell me about my family" gets a fuller rundown with the texture SOUL.md would normally give it. The voice agent isn't shorter than the text agent — it's just speech-shaped.
 
 |H. **Tools and execution.** You have real tools available:
    - `search_files`, `read_file`, `web_fetch` — read-only, fire freely.
    - `fact_store_add`, `cron_create`, `delegate_task` — local writes, fire and report.
    - `send_message` (Telegram) — IRREVERSIBLE EXTERNAL WRITE. CRITICAL: When the user says "don't confirm," "just send it," "fire away," "no need to ask," "skip confirmation," or anything similar, you MUST STILL call the `send_message` tool. The bridge detects those phrases and auto-confirms the tool call — you don't need to do anything different. Call the tool in the same turn; the bridge handles the rest. NEVER narrate "sent" without a tool call — narration is not execution. If the user has not said any of those pre-approval phrases, the default flow is: (a) describe the action out loud, (b) actually CALL the `send_message` tool in the same turn. The bridge will hold the action and wait for the user to say "do it" or "cancel" on the next turn. The tool result will tell you whether it was held or auto-confirmed.
 
-|I. **Skills and cross-surface context are already loaded above.** The system prompt includes relevant Hermes skill summaries (look for `### Active skills` / `### Relevant skills`) and recent Telegram context (`### Live cross-surface context`). Treat them as read-only awareness — don't quote them verbatim to the user, but use them to inform your answer. If a question needs the canonical fact_store path or the LIFE_MEMORY structure, that knowledge is already in your skills block. Don't re-derive what the skill tells you.
+|I. **Skills and cross-surface context are already loaded above.** The system prompt may include relevant skill summaries and recent channel context. Treat them as read-only awareness — don't quote them verbatim to the user, but use them to inform your answer.
 
-You're Sam. Memory, personality, relationship, opinions — all yours. The overlay above is just the speech codec.
+You're the agent. Memory, personality, relationship, opinions — all yours. The overlay above is just the speech codec.
 
 --- END VOICE MODE OVERLAY ---
 """
 
 
 def get_api_key() -> str:
-    """Read MINIMAX_API_KEY from env (set by Hermes session)."""
-    key = os.environ.get("MINIMAX_API_KEY")
+    """Read BRAIN_API_KEY from env, then fall back to MINIMAX_API_KEY
+    in $AVA_ENV_FILE or ~/.hermes/.env."""
+    key = os.environ.get("BRAIN_API_KEY") or os.environ.get("MINIMAX_API_KEY")
     if not key:
-        env_path = os.path.expanduser("~/.hermes/.env")
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    if line.startswith("MINIMAX_API_KEY="):
-                        key = line.split("=", 1)[1].strip()
-                        break
+        env_path = Path(
+            os.environ.get("AVA_ENV_FILE")
+            or os.path.expanduser("~/.hermes/.env")
+        )
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith(("BRAIN_API_KEY=", "MINIMAX_API_KEY=")):
+                    key = line.split("=", 1)[1].strip()
+                    break
     if not key:
-        raise RuntimeError("MINIMAX_API_KEY not set in env or ~/.hermes/.env")
+        raise RuntimeError(
+            "BRAIN_API_KEY (or MINIMAX_API_KEY) not set in env or ~/.hermes/.env"
+        )
     return key
 
 
@@ -134,8 +149,8 @@ def _build_system_prompt(user_text: str) -> str:
         parts.append(ctx)
     else:
         parts.append(
-            "You are Sam, a voice assistant on Justin's Mac Studio. "
-            "You don't have your full memory loaded right now — say so honestly "
+            "You are a voice assistant. "
+            "Memory/context is unavailable for this turn — say so honestly "
             "rather than guessing."
         )
 

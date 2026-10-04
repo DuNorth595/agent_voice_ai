@@ -100,7 +100,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env — at minimum, set ANTHROPIC_API_KEY.
+# Edit .env — at minimum, set BRAIN_API_KEY.
 ```
 
 ### 4. TLS (optional but required for iPhone)
@@ -133,20 +133,33 @@ All settings are environment variables (or entries in `.env`):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required. Anthropic API key for the brain. |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Model identifier. |
+| `BRAIN_API_KEY` | — | Required. API key for the brain. Falls back to `MINIMAX_API_KEY` for backward compat. |
+| `BRAIN_MODEL` | `MINIMAX-M3` | Model identifier. |
+| `BRAIN_API_URL` | `https://api.minimax.io/v1/messages` | Anthropic-compatible endpoint. |
 | `TELEGRAM_BOT_TOKEN` | — | Optional. Enables `send_message` tool. |
 | `TELEGRAM_HOME_CHANNEL` | — | Optional. Numeric chat_id for home channel. |
-| `VOICE_BRIDGE_HOST` | `0.0.0.0` | Bind address. |
-| `VOICE_BRIDGE_PORT` | `8770` | Bind port. |
-| `SAM_VOICE_TLS_CERT` | `certs/server.crt` | TLS cert path. |
-| `SAM_VOICE_TLS_KEY` | `certs/server.key` | TLS key path. |
-| `SAM_VOICE_HTTPS` | `1` (if certs exist) | Set `0` to force plain HTTP (localhost only). |
-| `SAM_VOICE_TTS_PROVIDER` | `piper` | `piper` or `kokoro`. |
-| `WHISPER_CPP_URL` | `http://localhost:8080/inference` | whisper.cpp server endpoint. |
+| `AVA_HOST` | `0.0.0.0` | Bind address. |
+| `AVA_PORT` | `8770` | Bind port. |
+| `AVA_TLS_CERT` | `certs/server.crt` | TLS cert path. |
+| `AVA_TLS_KEY` | `certs/server.key` | TLS key path. |
+| `AVA_HTTPS` | `1` (if certs exist) | Set `0` to force plain HTTP (localhost only). |
+| `AVA_TTS_PROVIDER` | `piper` | `piper` or `kokoro`. |
+| `AVA_CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins. |
+| `AVA_VERBOSE` | `0` | Set `1` for DEBUG logging. |
+| `WHISPER_URL` | `http://127.0.0.1:8178/inference` | whisper.cpp server endpoint. |
 | `PIPER_BIN` | `piper` | Piper CLI binary. |
-| `PIPER_MODEL_PATH` | — | Path to the Piper ONNX voice model. |
-| `SAM_VOICE_VERBOSE` | `0` | Set `1` for DEBUG logging. |
+| `PIPER_MODEL_DIR` | `~/.local/share/piper/voices` | Directory holding Piper ONNX voice files. |
+| `PIPER_MODEL` | `en_US-libritts_r-medium` | Voice model filename (without `.onnx`). |
+| `KOKORO_URL` | `http://127.0.0.1:8080` | Kokoro TTS server endpoint. |
+| `KOKORO_VOICE` | `af_heart` | Kokoro voice name. |
+| `MEMORY_SOUL_PATH` | `~/.config/agent-voice-ai/SOUL.md` | Personality/voice rules markdown. |
+| `MEMORY_INDEX_PATH` | `~/.config/agent-voice-ai/MEMORY_INDEX.md` | Long-term memory index. |
+| `MEMORY_LIFE_DIR` | `~/.local/share/agent-voice-ai/life` | Directory of memory files. |
+| `MEMORY_FACT_STORE_DB` | `~/.local/share/agent-voice-ai/facts.db` | SQLite db of operational facts. |
+| `MEMORY_SESSIONS_DIR` | `~/.local/share/agent-voice-ai/sessions` | Session history directory. |
+| `AVA_SKILLS_ROOT` | `~/.hermes/skills` | Root directory containing skill subdirs. |
+| `AVA_ALWAYS_LOAD_SKILLS` | (empty) | Comma-separated skills to always inject. |
+| `AVA_TRIGGER_KEYWORDS_JSON` | (empty) | Override the default keyword→skill trigger map. |
 
 ---
 
@@ -230,11 +243,11 @@ Copyright © 2026 Justin Douglas / SDevLabs.
 
 ### What this project is, in one paragraph
 
-A self-hosted push-to-talk voice agent bridge. The user owns the box (Mac Studio, `~/voice-bridge/`), runs whisper.cpp + piper TTS locally, and talks to Anthropic's API for the LLM. The user accesses the agent from iPhone Safari over Tailscale. The agent has a tool subset tuned for voice — no terminal, no write_file, no shell. Irreversible external actions (Telegram send) hold for explicit confirmation. The repo is at v0.9.1; the internal canonical doc is `~/Desktop/LIFE_MEMORY/SAM/SAM_CHAT.md`.
+A self-hosted push-to-talk voice agent bridge. The user runs whisper.cpp + piper TTS locally on their own hardware (any Unix box — Mac, Linux, a NUC, a Raspberry Pi 5), and the LLM call goes to any Anthropic-compatible API. The bridge serves a single-page HTML/JS frontend over HTTPS that can be reached from a phone browser (iOS Safari works). The agent has a voice-tuned tool subset — read-only tools fire freely, local writes fire and report, irreversible external writes (Telegram) hold for explicit confirmation. The repo is at v0.9.1.
 
 ### Load-bearing invariants
 
-1. **Voice is a modality, not a different entity.** The voice agent is the same Sam as the chat agent. Don't fork personality per surface.
+1. **Voice is a modality, not a different entity.** When the agent has a personality / SOUL.md / memory, the voice bridge reuses the same — don't fork personality per surface.
 2. **Narration is not action.** The agent must call the tool to make it happen. If the agent narrates "I sent it" without invoking `send_message`, that is a bug. See v0.8c bug history.
 3. **Pre-approval does not skip the tool.** It auto-confirms the tool. Look for phrases like "fire away" / "no confirmation needed" and execute `send_message` immediately instead of holding.
 4. **iOS Safari is fragile.** All audio paths assume the user may need to tap to unlock. The "tap anywhere to resume" cue is the safety net. Never silent-fail on audio errors.
@@ -257,17 +270,17 @@ A self-hosted push-to-talk voice agent bridge. The user owns the box (Mac Studio
 
 ### Things to NOT do without asking the user
 
-- **Push to a public remote.** The repo isn't git-tracked yet. When it is, treat credentials carefully — see `.env.example` for what should never be committed.
+- **Push to a public remote.** The repo isn't git-tracked by default. If a fork is published, treat credentials carefully — see `.env.example` for what should never be committed.
 - **Add new tools to `tools.py`.** The voice-smart subset is curated; adding `terminal` or `write_file` defeats the safety model. Confirm with the user first.
-- **Add a wake-word.** Out of scope until JARVIS-trajectory work. Listed as "not built" in `VOICE_PIPELINE.md`.
+- **Add a wake-word.** Out of scope until openWakeWord / Porcupine is wired in. See the `[unreleased]` → `### Planned` section in CHANGELOG.md.
 - **Touch `certs/`.** TLS certs are operator-managed. The bridge auto-detects their presence.
 
 ### Where to read more
 
-- `~/Desktop/LIFE_MEMORY/SAM/SAM_CHAT.md` — internal canonical doc (version history, full architecture, iOS quirks deep-dive)
-- `~/Desktop/LIFE_MEMORY/SAM/VOICE_PIPELINE.md` — forward-looking architecture sketch (5-stage pipeline)
-- `~/Desktop/LIFE_MEMORY/SAM/CONTINUITY_ROADMAP.md` — voice as a load-bearing target for future forks
-- `~/.claude/skills/` — saved procedures; check for any voice-related skills before improvising
+- `CHANGELOG.md` — version history (what changed, what broke, what was learned)
+- `SECURITY.md` — threat model, secret-handling rules, known limitations
+- `SYNC.md` — pre-release sync checklist (doc / test / version drift detector)
+- `CONTRIBUTING.md` — Conventional Commits, code style, two-layer secret defense
 
 ### Common tasks
 

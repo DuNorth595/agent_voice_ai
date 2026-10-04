@@ -2,7 +2,7 @@
 """
 agent_voice_ai.py — The agent-voice-ai bridge.
 
-FastAPI server on port 8770 (configurable via VOICE_BRIDGE_PORT env).
+FastAPI server on port 8770 (configurable via AVA_PORT env).
 Endpoints:
   GET  /              → minimal web UI (HTML)
   GET  /api/health    → health check
@@ -49,16 +49,16 @@ logging.basicConfig(
 log = logging.getLogger("agent_voice_ai.bridge")
 
 # ---- app ----
-app = FastAPI(title="sam Voice Bridge", version="0.9.1")
+app = FastAPI(title="agent-voice-ai", version="0.9.1")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Tailscale-only network; safe enough
+    allow_origins=os.environ.get("AVA_CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-PORT = int(os.environ.get("VOICE_BRIDGE_PORT", "8770"))
-HOST = os.environ.get("VOICE_BRIDGE_HOST", "0.0.0.0")  # bind 0.0.0.0 for Tailscale
+PORT = int(os.environ.get("AVA_PORT", "8770"))
+HOST = os.environ.get("AVA_HOST", "0.0.0.0")  # bind 0.0.0.0 so any LAN interface (or VPN/Tailscale) can reach it
 
 
 def _synth_with_fallback(reply_text: str) -> tuple[bytes, str]:
@@ -68,7 +68,7 @@ def _synth_with_fallback(reply_text: str) -> tuple[bytes, str]:
     run_in_executor at the call site to keep the event loop responsive.
     """
     tts_provider = os.environ.get("AGENT_VOICE_TTS_PROVIDER", "piper").lower()
-    # Primary: Piper (the "regular Sam voice")
+    # Primary: Piper (the default voice-bridge TTS)
     if tts_provider == "piper" and piper_tts.is_available():
         return piper_tts.synth_to_wav_bytes(reply_text), "piper"
     # Fallback: Kokoro (only if it actually imported)
@@ -514,7 +514,7 @@ async function startMic() {
   }
   // Some embedded browsers (Telegram, in-app webviews) lack getUserMedia entirely.
   if (window.location.protocol !== "https:" && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
-    showHint("Mic requires HTTPS or a Tailscale IP. You're on " + window.location.protocol + "//" + window.location.hostname);
+    showHint("Mic requires HTTPS or localhost. You're on " + window.location.protocol + "//" + window.location.hostname);
     return;
   }
   try {
@@ -1325,8 +1325,9 @@ async def history(session_id: str):
 async def memory_context_endpoint(q: str = ""):
     """Show the memory context that would be injected for query `q`.
 
-    Used for transparency — see exactly what Sam "remembers" before answering.
-    No LLM call is made; this just builds the same memory context brain.py uses.
+    Used for transparency — see exactly what the agent will "remember"
+    before answering. No LLM call is made; this just builds the same
+    memory context brain.py uses.
     """
     import memory
     ctx = memory.build_memory_context(q or "general context")
@@ -1393,7 +1394,7 @@ async def health():
             "soul_md": bool(memory.SOUL_PATH.exists()),
             "sam_index": bool(memory.SAM_INDEX_PATH.exists()),
             "fact_store_db": memory.FACT_STORE_DB.exists(),
-            "life_memory_dir": memory.LIFE_MEMORY.exists(),
+            "life_memory_dir": memory.LONG_TERM_MEMORY_DIR.exists(),
             "sessions_on_disk": memory.session_count(),
         },
         "tts_chain": "piper (libritts_r) -> kokoro (am_adam) fallback",
@@ -1760,9 +1761,9 @@ def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000) -> bytes:
 if __name__ == "__main__":
     import uvicorn
 
-    # Optional HTTPS via Tailscale cert. iOS Safari blocks getUserMedia on http://
-    # origins, so we serve HTTPS when the cert files are present. Set
-    # AGENT_VOICE_HTTPS=0 to force plain HTTP (e.g. for local dev).
+    # Optional HTTPS — iOS Safari blocks getUserMedia on http:// origins,
+    # so we serve HTTPS when cert files are present. Set AVA_HTTPS=0 to
+    # force plain HTTP (e.g. for local dev).
     cert_path = os.environ.get("AGENT_VOICE_TLS_CERT", os.path.join(os.path.dirname(__file__), "certs", "server.crt"))
     key_path = os.environ.get("AGENT_VOICE_TLS_KEY", os.path.join(os.path.dirname(__file__), "certs", "server.key"))
     use_https = os.environ.get("AGENT_VOICE_HTTPS", "1") != "0" and os.path.exists(cert_path) and os.path.exists(key_path)
@@ -1774,8 +1775,8 @@ if __name__ == "__main__":
         # Pre-warm Kokoro in a background thread so the first /api/chat is fast.
         import threading
         threading.Thread(target=_warm_kokoro, daemon=True).start()
-        # Prime Telegram context cache and start the poller so voice Sam
-        # knows what's happening on Telegram without a manual prompt.
+        # Prime Telegram context cache and start the poller so the voice agent
+        # has fresh cross-surface context without a manual prompt.
         try:
             import telegram_sync
             threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()

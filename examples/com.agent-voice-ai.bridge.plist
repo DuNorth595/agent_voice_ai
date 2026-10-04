@@ -23,9 +23,9 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>VOICE_BRIDGE_PORT</key>
+        <key>AVA_PORT</key>
         <string>8770</string>
-        <key>VOICE_BRIDGE_HOST</key>
+        <key>AVA_HOST</key>
         <string>0.0.0.0</string>
     </dict>
 

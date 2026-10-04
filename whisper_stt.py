@@ -2,20 +2,22 @@
 """
 whisper_stt.py — Speech-to-text client for whisper-server.
 
-Calls the local whisper-server (port 8178) which runs whisper.cpp with
-Metal acceleration on Apple Silicon.
+Calls the local whisper-server (default port 8178) which runs whisper.cpp
+with Metal acceleration on Apple Silicon (or CPU elsewhere). Configure
+via env: WHISPER_URL (default http://127.0.0.1:8178/inference).
 """
 import io
 import logging
+import os
 import time
 import wave
 
 import requests
 
-log = logging.getLogger("sam.voice.stt")
+log = logging.getLogger("ava.stt.whisper")
 
-WHISPER_URL = "http://127.0.0.1:8178/inference"
-DEFAULT_TIMEOUT = 30
+WHISPER_URL = os.environ.get("WHISPER_URL", "http://127.0.0.1:8178/inference")
+DEFAULT_TIMEOUT = int(os.environ.get("WHISPER_TIMEOUT", "30"))
 
 
 def _ensure_wav(audio_bytes: bytes, sample_rate: int = 16000) -> bytes:
@@ -62,16 +64,23 @@ def transcribe_wav_pcm(pcm_bytes: bytes, sample_rate: int = 16000) -> str:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
-    print("=== testing whisper_stt.transcribe with kokoro-generated audio ===")
-    import os
-    if os.path.exists("/tmp/sam-voice-test/whisper/test_phrase.wav"):
-        with open("/tmp/sam-voice-test/whisper/test_phrase.wav", "rb") as f:
-            wav = f.read()
-        text = transcribe(wav)
+    print("=== testing whisper_stt.transcribe with self-generated audio ===")
+    # Self-test: synthesize a phrase with TTS, transcribe it, compare.
+    try:
+        import tempfile
+        from piper_tts import synth_to_wav_bytes
+        test_phrase = "the quick brown fox jumps over the lazy dog"
+        wav = synth_to_wav_bytes(test_phrase)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, prefix="ava-whisper-test-") as tf:
+            tf.write(wav)
+            tmp_path = tf.name
+        with open(tmp_path, "rb") as f:
+            wav_read = f.read()
+        text = transcribe(wav_read)
         print(f"  transcript: {text!r}")
         if "fox" in text.lower() or "brown" in text.lower():
             print("  PASS")
         else:
             print("  FAIL: didn't get expected text")
-    else:
-        print("  no test audio, skipping")
+    except Exception as e:
+        print(f"  skipped: {e}")

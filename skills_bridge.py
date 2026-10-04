@@ -1,70 +1,90 @@
 """
-Skill loading for voice-bridge.
+skills_bridge.py — Skill loader for the voice bridge.
 
-Loads the SKILL.md files that are relevant to the current query and
-injects them into the system prompt. Two strategies:
+Loads SKILL.md files relevant to the current query and injects them
+into the system prompt. Two strategies:
 
-1. ALWAYS-LOAD: skills that should be present every turn
-   (saving-cross-session-memory-context, life-memory-lookup)
-2. TRIGGER-LOAD: skills surfaced by keyword heuristics
+1. ALWAYS-LOAD: skills present on every turn. Configurable via the
+   `AVA_ALWAYS_LOAD_SKILLS` env var (comma-separated names). Default:
+   empty.
+2. TRIGGER-LOAD: skills surfaced by keyword heuristics. The default
+   trigger map below is intentionally tiny and generic — operators
+   should fork this file and add their own keyword → skill mappings.
 
-Each loaded skill is summarized to the prompt as: name + a short
-description + a brief excerpt of the procedure. The full text is
-NOT inlined — too big. If the model needs more, it can call a
-"load_skill" tool to get the full SKILL.md text on demand.
+Each loaded skill is summarized in the prompt as: name + a short
+description + a brief excerpt of the procedure. The full text is NOT
+inlined — too big. If the model needs more, it can call a `read_file`
+tool to fetch the full SKILL.md.
 
 Source paths:
-  ~/.hermes/skills/<name>/SKILL.md
-"""
+  $AVA_SKILLS_ROOT  default: ~/.hermes/skills
 
+A skill is a directory `<root>/<name>/SKILL.md`. Frontmatter (YAML
+between `---` lines) is parsed for `name` + `description`.
+"""
 from __future__ import annotations
 
+import logging
+import os
 import re
 from pathlib import Path
 from typing import Iterable
 
-SKILLS_ROOT = Path.home() / ".hermes" / "skills"
+log = logging.getLogger("ava.skills")
 
-ALWAYS_LOAD = (
-    "saving-cross-session-memory-context",
-    "life-memory-lookup",
+# Configurable. Default: ~/.hermes/skills (Hermes convention).
+SKILLS_ROOT = Path(
+    os.environ.get("AVA_SKILLS_ROOT")
+    or (Path.home() / ".hermes" / "skills")
 )
 
-# Trigger keyword -> skill name
-TRIGGER_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "morning intel": ("briefings",),
-    "morning brief": ("briefings",),
-    "ai intel": ("briefings",),
-    "market brief": ("briefings",),
-    "kd0kah": ("kd0kah-fire-monitor", "kd0kah-alert-cadence"),
-    "fire monitor": ("kd0kah-fire-monitor",),
-    "alert cadence": ("kd0kah-alert-cadence",),
-    "p25": ("radio-systems",),
-    "mmdvm": ("radio-systems",),
-    "apx": ("radio-systems",),
-    "launchagent": ("launchagent-env-drift", "hermes-mac-ops"),
-    "launchd": ("launchagent-env-drift", "hermes-mac-ops"),
+# Configurable. Default: empty list. Operators set this to whatever
+# skills they want present on every turn, comma-separated.
+_ALWAYS_LOAD_ENV = os.environ.get("AVA_ALWAYS_LOAD_SKILLS", "")
+ALWAYS_LOAD: tuple[str, ...] = tuple(
+    s.strip() for s in _ALWAYS_LOAD_ENV.split(",") if s.strip()
+)
+
+
+# Default trigger keyword → skill name mapping.
+#
+# This list is intentionally tiny and generic — operators should fork
+# this file and add their own mappings. The defaults here cover the
+# most common voice-bridge maintenance topics (TTS/STT provider swaps,
+# audio quirks, deployment hygiene). Personal/callsign/project triggers
+# belong in the operator's fork, not here.
+DEFAULT_TRIGGER_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "tts": ("voice-widget-piper-swap",),
+    "piper": ("voice-widget-piper-swap",),
+    "stt": ("voice-widget-piper-swap",),
+    "whisper": ("voice-widget-piper-swap",),
+    "audio cut": ("voice-widget-first-word-cutoff",),
+    "first word": ("voice-widget-first-word-cutoff",),
+    "browser": ("browser-tool-stability-fix",),
+    "launchd": ("launchagent-env-drift",),
+    "launchagent": ("launchagent-env-drift",),
     "cron": ("hermes-cron-script-args",),
     "telegram bot": ("intel-brief-telegram-token-rotation",),
     "token rotation": ("intel-brief-telegram-token-rotation",),
-    "memory drift": ("memory-drift-soft-fail",),
-    "memory tool": ("saving-cross-session-memory-context", "life-memory-lookup"),
-    "life memory": ("life-memory-lookup",),
-    "fact_store": ("life-memory-lookup",),
-    "ollama": ("inference-sh",),
-    "whisper": ("voice-widget-piper-swap", "voice-widget-first-word-cutoff"),
-    "piper": ("voice-widget-piper-swap",),
-    "browser": ("browser-tool-stability-fix",),
-    "smart-home": ("smart-home",),
-    "home assistant": ("smart-home",),
-    "xrpl": ("xrpl-mpt-distribution",),
-    "xlm": ("xlm-rwa-dashboard-polish",),
-    "stellar": ("xlm-rwa-dashboard-polish",),
-    "post workout": ("sam-post-workout-shake",),
-    "shake": ("sam-post-workout-shake",),
-    "screen lock": ("ios-app-development",),
-    "ios app": ("ios-app-development",),
+    "memory": ("saving-cross-session-memory-context",),
+    "fact_store": ("saving-cross-session-memory-context",),
 }
+
+# Operator-overridable. If AVA_TRIGGER_KEYWORDS_JSON is set, it replaces
+# DEFAULT_TRIGGER_KEYWORDS entirely. Use this to plug in your own map
+# without forking the file.
+_TRIGGER_OVERRIDE = os.environ.get("AVA_TRIGGER_KEYWORDS_JSON")
+if _TRIGGER_OVERRIDE:
+    import json
+    try:
+        TRIGGER_KEYWORDS: dict[str, tuple[str, ...]] = {
+            k: tuple(v) for k, v in json.loads(_TRIGGER_OVERRIDE).items()
+        }
+    except Exception as e:
+        log.warning("AVA_TRIGGER_KEYWORDS_JSON parse failed: %s; using defaults", e)
+        TRIGGER_KEYWORDS = DEFAULT_TRIGGER_KEYWORDS
+else:
+    TRIGGER_KEYWORDS = DEFAULT_TRIGGER_KEYWORDS
 
 
 def _read_skill(name: str) -> str | None:
@@ -73,7 +93,8 @@ def _read_skill(name: str) -> str | None:
         return None
     try:
         return path.read_text()
-    except OSError:
+    except OSError as e:
+        log.warning("failed to read skill %s: %s", name, e)
         return None
 
 
@@ -82,168 +103,99 @@ def _parse_frontmatter(text: str) -> tuple[str, str]:
 
     Handles multi-line YAML descriptions with literal block style (|).
     """
+    if not text.startswith("---"):
+        return ("", "")
+    end = text.find("\n---", 3)
+    if end < 0:
+        return ("", "")
+    fm = text[3:end].strip()
     name = ""
     description = ""
-    if not text.startswith("---\n"):
-        return name, description
-    try:
-        end = text.index("\n---\n", 4)
-        block = text[4:end]
-    except ValueError:
-        return name, description
-
-    lines = block.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    desc_buf: list[str] = []
+    in_description = False
+    for line in fm.splitlines():
         if line.startswith("name:"):
             name = line.split(":", 1)[1].strip()
-            i += 1
-            continue
-        if line.startswith("description:"):
-            value = line.split(":", 1)[1].strip()
-            if value == "|" or value == ">":
-                i += 1
-                buf: list[str] = []
-                while i < len(lines) and (lines[i].startswith("  ") or lines[i] == ""):
-                    buf.append(lines[i].lstrip())
-                    if i + 1 < len(lines) and lines[i + 1] and not lines[i + 1].startswith(" "):
-                        break
-                    i += 1
-                description = " ".join(b for b in buf if b)
+            in_description = False
+        elif line.startswith("description:"):
+            rest = line.split(":", 1)[1].strip()
+            if rest.startswith("|") or rest.startswith(">"):
+                in_description = True
+                desc_buf = []
             else:
-                description = value
-            i += 1
-            continue
-        i += 1
-    return name, description
+                description = rest
+                in_description = False
+        elif in_description:
+            # Continuation of a block-style description
+            desc_buf.append(line)
+    if desc_buf and not description:
+        description = "\n".join(desc_buf).strip()
+    return (name, description)
 
 
-def _short_section(text: str, heading: str, max_chars: int = 220) -> str:
-    """Return the body of the FIRST `## <heading>` section, capped tightly."""
-    pattern = re.compile(rf"^##\s+{re.escape(heading)}\s*$", re.MULTILINE)
-    match = pattern.search(text)
-    if not match:
-        return ""
-    start = match.end()
-    next_heading = re.search(r"^##\s+", text[start:], re.MULTILINE)
-    end = start + next_heading.start() if next_heading else len(text)
-    body = text[start:end].strip()
-    body = re.sub(r"\n{2,}", "\n", body)
-    return body[:max_chars]
+def _summarize(name: str, text: str, max_chars: int = 600) -> str:
+    """Build a compact summary: name + description + brief excerpt."""
+    _, desc = _parse_frontmatter(text)
+    body_lines = [
+        ln for ln in text.splitlines()
+        if ln.strip() and not ln.startswith("---")
+    ]
+    excerpt = "\n".join(body_lines[:6])
+    if len(excerpt) > max_chars:
+        excerpt = excerpt[:max_chars] + "\n[…truncated…]"
+    return f"- **{name}** — {desc}\n  ```\n  {excerpt}\n  ```"
 
 
-def _first_section(text: str, heading: str, max_chars: int = 800) -> str:
-    """Return the body of the first `## <heading>` section, capped."""
-    pattern = re.compile(rf"^##\s+{re.escape(heading)}\s*$", re.MULTILINE)
-    match = pattern.search(text)
-    if not match:
-        return ""
-    start = match.end()
-    next_heading = re.search(r"^##\s+", text[start:], re.MULTILINE)
-    end = start + next_heading.start() if next_heading else len(text)
-    body = text[start:end].strip()
-    return body[:max_chars]
+def load_skills_for_query(query: str, always_load: Iterable[str] | None = None) -> str:
+    """Return a markdown block summarizing relevant skills.
 
-
-def _summarize(text: str, max_chars: int = 260) -> str:
-    """Pull name + description + a compact useful excerpt."""
-    name, description = _parse_frontmatter(text)
-    excerpt = (
-        _short_section(text, "Trigger Conditions", max_chars=180)
-        or _short_section(text, "Procedure", max_chars=200)
-        or _short_section(text, "Triggers", max_chars=160)
-    )
-    excerpt = excerpt.strip()
-    full = f"### {name}\n{description}"
-    if excerpt:
-        full = f"{full}\n\n{excerpt}"
-    return full[:max_chars]
-
-
-def _triggered_skills(query: str) -> tuple[str, ...]:
-    q = query.lower()
-    hits: set[str] = set()
-    for keyword, names in TRIGGER_KEYWORDS.items():
-        if keyword in q:
-            hits.update(names)
-    return tuple(hits)
-
-
-def build_skills_context(query: str, budget_chars: int = 2600) -> str:
-    """Build the skills block to inject into the system prompt.
-
-    Layout:
-      ### Active skills (ALWAYS-LOAD)
-      ### Relevant skills (TRIGGER-LOAD by current query)
+    Combines always-load skills + trigger-matched skills (deduped), capped
+    at 4 total. Returns an empty string if no skills are configured or
+    none match.
     """
-    sections: list[str] = []
-    used_chars = 0
+    always_load = tuple(always_load) if always_load is not None else ALWAYS_LOAD
+    q = query.lower()
+    triggered: list[str] = []
+    for kw, names in TRIGGER_KEYWORDS.items():
+        if kw in q:
+            triggered.extend(names)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for s in list(always_load) + triggered:
+        if s and s not in seen:
+            seen.add(s)
+            ordered.append(s)
+    ordered = ordered[:4]
 
-    sections.append("### Active skills (loaded every turn)")
-    used_chars += len(sections[-1])
-    for name in ALWAYS_LOAD:
+    blocks: list[str] = []
+    for name in ordered:
         text = _read_skill(name)
         if not text:
             continue
-        summary = _summarize(text, max_chars=420)
-        block = f"\n--- {name} ---\n{summary}"
-        if used_chars + len(block) > budget_chars:
-            break
-        sections.append(block)
-        used_chars += len(block)
+        blocks.append(_summarize(name, text))
 
-    triggered = _triggered_skills(query)
-    triggered = tuple(n for n in triggered if n not in ALWAYS_LOAD)
-    if triggered:
-        sections.append("\n### Relevant skills (matched by current query)")
-        used_chars += len(sections[-1])
-        for name in triggered:
-            text = _read_skill(name)
-            if not text:
-                continue
-            summary = _summarize(text, max_chars=320)
-            block = f"\n--- {name} ---\n{summary}"
-            if used_chars + len(block) > budget_chars:
-                sections.append(f"\n(more skills available; budget reached)")
-                used_chars += 60
-                break
-            sections.append(block)
-            used_chars += len(block)
+    if not blocks:
+        return ""
 
-    return "\n".join(sections)
-
-
-def load_full_skill(name: str) -> str:
-    """Return the full SKILL.md text. Used by the load_skill tool."""
-    text = _read_skill(name)
-    if text is None:
-        return f"Skill '{name}' not found at {SKILLS_ROOT / name / 'SKILL.md'}"
-    return text
-
-
-def list_skill_names() -> list[str]:
-    """Return all installed skill names."""
-    if not SKILLS_ROOT.exists():
-        return []
-    return sorted(p.name for p in SKILLS_ROOT.iterdir() if p.is_dir() and (p / "SKILL.md").exists())
-
-
-def render_skill_index() -> str:
-    """Compact index of available skills — useful for one-shot discovery."""
-    names = list_skill_names()
-    if not names:
-        return "(no skills installed)"
-    return "\n".join(f"- {n}" for n in names)
+    header = "## Active skills\n"
+    note = (
+        "(Procedures for this query — each is summarized here. Use the\n"
+        "`read_file` tool to fetch the full SKILL.md if needed.)\n"
+    )
+    return header + note + "\n".join(blocks)
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "context":
-        query = " ".join(sys.argv[2:]) or "memory tool life memory"
-        print(build_skills_context(query))
-    elif len(sys.argv) > 1 and sys.argv[1] == "list":
-        print(render_skill_index())
-    else:
-        print("usage: python -m skills_bridge context <query>")
-        print("       python -m skills_bridge list")
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    )
+    print(f"=== skills_bridge: skills root = {SKILLS_ROOT} ===")
+    print(f"    exists: {SKILLS_ROOT.exists()}")
+    print(f"    always-load: {ALWAYS_LOAD}")
+    print(f"    trigger keywords: {len(TRIGGER_KEYWORDS)}")
+    print()
+    ctx = load_skills_for_query("how do I configure piper?")
+    print(f"--- load_skills_for_query('how do I configure piper?') ---")
+    print(ctx if ctx else "(empty — no skills configured)")

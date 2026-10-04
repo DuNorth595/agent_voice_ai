@@ -29,9 +29,18 @@ from typing import Callable, Any
 log = logging.getLogger("sam.tools")
 
 HOME = Path.home()
-HERMES_DIR = HOME / ".hermes"
-FACT_STORE_DB = HERMES_DIR / "memory_store.db"
-LIFE_MEMORY = HOME / "Desktop" / "LIFE_MEMORY"
+# Configurable directories — see memory.py for the same env-driven pattern.
+# Override via .env or your shell. Defaults follow XDG conventions and
+# contain nothing out of the box.
+_HERMES_DIR = Path(os.environ.get("HERMES_DIR") or (HOME / ".hermes"))
+FACT_STORE_DB = Path(
+    os.environ.get("MEMORY_FACT_STORE_DB")
+    or (HOME / ".local" / "share" / "agent-voice-ai" / "facts.db")
+)
+LONG_TERM_MEMORY_DIR = Path(
+    os.environ.get("MEMORY_LIFE_DIR")
+    or (HOME / ".local" / "share" / "agent-voice-ai" / "life")
+)
 
 # Tier classifications — used by brain.py to decide whether to gate execution
 READ_ONLY = "read_only"
@@ -42,10 +51,13 @@ EXTERNAL_WRITE = "external_write"
 # ---------- helpers ----------
 
 def _load_env() -> dict:
+    """Read .env from a configurable location. Falls back to ~/.hermes/.env
+    if HERMES_DIR is set or if the file exists there. Override with the
+    AVA_ENV_FILE env var to point at a different file."""
     env = {}
-    p = HERMES_DIR / ".env"
-    if p.exists():
-        for line in p.read_text().splitlines():
+    env_file = Path(os.environ.get("AVA_ENV_FILE") or _HERMES_DIR / ".env")
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
             if "=" in line and not line.strip().startswith("#"):
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
@@ -65,12 +77,14 @@ def _search_stopwords() -> set:
 # ---------- READ_ONLY tools ----------
 
 def search_files(args: dict) -> dict:
-    """Search file contents under a path. Args: query, path (default ~/Desktop/LIFE_MEMORY),
-    limit (default 20). Scoped to LIFE_MEMORY by default to keep searches fast."""
+    """Search file contents under a path. Args: query, path (default $MEMORY_LIFE_DIR
+    or ~/.local/share/agent-voice-ai/life), limit (default 20). If MEMORY_LIFE_DIR
+    is not set and the default directory doesn't exist, falls back to the home dir.
+    Scoped to keep searches fast — pass an explicit `path` for big trees."""
     query = args.get("query", "").strip()
     if not query:
         return {"error": "query is required"}
-    search_path = args.get("path") or str(LIFE_MEMORY)
+    search_path = args.get("path") or (str(LONG_TERM_MEMORY_DIR) if LONG_TERM_MEMORY_DIR.exists() else str(HOME))
     search_path = os.path.expanduser(search_path)
     limit = min(int(args.get("limit", 20)), 50)
 
@@ -251,7 +265,7 @@ def send_message(args: dict) -> dict:
 
     token = _load_env().get("TELEGRAM_BOT_TOKEN")
     if not token:
-        return {"error": "TELEGRAM_BOT_TOKEN missing from ~/.hermes/.env"}
+        return {"error": "TELEGRAM_BOT_TOKEN missing from $AVA_ENV_FILE or ~/.hermes/.env"}
 
     payload = {"chat_id": chat_id, "text": text}
     rid = args.get("reply_to_message_id")
@@ -286,7 +300,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "search_files": {
         "fn": search_files,
         "tier": READ_ONLY,
-        "description": "Search file contents by regex/keyword. Args: query (str, required), path (str, default ~), limit (int, default 20).",
+        "description": "Search file contents by regex/keyword. Args: query (str, required), path (str, default $MEMORY_LIFE_DIR), limit (int, default 20).",
     },
     "read_file": {
         "fn": read_file,
@@ -391,7 +405,8 @@ if __name__ == "__main__":
         print(f"  {n}: {s['tier']}")
     print("--- anthropic tools shape ---")
     print(json.dumps(anthropic_tools()[0], indent=2))
-    print("--- smoke: read_file ---")
-    print(json.dumps(read_file({"path": "~/.hermes/SOUL.md", "max_lines": 5}), indent=2)[:400])
+    print("--- smoke: read_file (will skip if no SOUL.md at the configured path) ---")
+    soul_path = os.environ.get("MEMORY_SOUL_PATH", str(Path.home() / ".config" / "agent-voice-ai" / "SOUL.md"))
+    print(json.dumps(read_file({"path": soul_path, "max_lines": 5}), indent=2)[:400])
     print("--- smoke: search_files ---")
-    print(json.dumps(search_files({"query": "p25 trunking", "limit": 5}), indent=2)[:400])
+    print(json.dumps(search_files({"query": "example", "limit": 5}), indent=2)[:400])

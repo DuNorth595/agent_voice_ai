@@ -26,7 +26,7 @@ Please include:
 
 | Asset | Where it lives | What this bridge does with it |
 |---|---|---|
-| LLM API key | Operator's `.env` file (or KMS, future) | Reads via `os.environ["ANTHROPIC_API_KEY"]`. **Never logs it. Never writes it to disk. Never includes it in error tracebacks.** |
+| LLM API key | Operator's `.env` file (or KMS, future) | Reads via `os.environ["BRAIN_API_KEY"]` (falls back to `MINIMAX_API_KEY`). **Never logs it. Never writes it to disk. Never includes it in error tracebacks.** |
 | Telegram bot token | Operator's `.env` file | Reads via `os.environ["TELEGRAM_BOT_TOKEN"]`. Used only by `telegram_sync.py` to poll updates and push messages. **Never logs it.** |
 | Chat ID | Operator's `.env` file | Read-only destination address for outbound messages. Not a secret on its own but should still not be committed. |
 | TLS private key | `certs/server.key` | Used by FastAPI/uvicorn to terminate HTTPS. **Never logged.** Never leaves the host. |
@@ -39,7 +39,7 @@ Please include:
 1. **Never log a secret.** `print(api_key)`, `logger.info(token)`, `repr(env_dict)` — all forbidden.
    The cleanest pattern is to log a **hash or last-4-chars** for correlation:
    ```python
-   key = os.environ["ANTHROPIC_API_KEY"]
+   key = os.environ["BRAIN_API_KEY"]  # or MINIMAX_API_KEY as a fallback
    logger.info("api_key loaded (%d chars, suffix=…%s)", len(key), key[-4:])
    ```
 2. **Never commit a secret.** Two layers of defense:
@@ -47,7 +47,7 @@ Please include:
      `git status --ignored | grep -E '\.env$|\.key$|\.pem$'`.
    - **Manual review** of `git diff --cached` for any string that looks like a token (`sk-ant-…`, `1234567890:AA…`, `-----BEGIN … PRIVATE KEY-----`).
    If you need a test secret, generate one inside the test (e.g. `os.environ["TEST_FAKE_KEY"] = "test_" + secrets.token_hex(16)`).
-3. **Use environment variables, never hardcoded literals.** `os.environ["ANTHROPIC_API_KEY"]`,
+3. **Use environment variables, never hardcoded literals.** `os.environ["BRAIN_API_KEY"]`,
    not `client = Anthropic(api_key="sk-ant-...")`. The env var should be set in a shell
    that's not logged.
 4. **No secrets in error messages.** When wrapping exceptions, log `e.args[0]` (the human
@@ -80,7 +80,7 @@ We pin minimum versions in `requirements.txt` (major-version floor) but do not p
 
 ## Known limitations
 
-1. **No WebSocket auth yet.** Today, anyone who can reach the bridge's port can stream audio in and read the served HTML. Mitigation: bind to `127.0.0.1` only, or front it with Tailscale / a reverse proxy that does auth. v0.10 will add a `SAM_VOICE_WS_TOKEN` env var + `Authorization: Bearer …` check on `/ws`.
+1. **No WebSocket auth yet.** Today, anyone who can reach the bridge's port can stream audio in and read the served HTML. Mitigation: bind to `127.0.0.1` only, or front it with Tailscale / a reverse proxy that does auth. v0.10 will add an `AVA_WS_TOKEN` env var + `Authorization: Bearer *** check on `/ws`.
 2. **No rate limiting.** A malicious client could spam the WS endpoint and rack up LLM API costs. Mitigation: same as #1 (network-level access control). v0.10 will add per-IP token-bucket limits.
 3. **No CSRF on the HTML page.** The static page has no state to protect today, but if you add user accounts / settings persistence in a fork, defend against CSRF with SameSite cookies + a custom request header.
 4. **Audio is not persisted, but LLM provider retention applies.** Anthropic's API retains prompts for 30 days by default (per their policy at the time of writing). If you need stricter retention, set `Anthropic-Vendor: …` headers or use a self-hosted LLM.

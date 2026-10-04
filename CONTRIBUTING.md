@@ -20,7 +20,7 @@ Thanks for considering a contribution to `agent-voice-ai`. This is a small, focu
 
 ```bash
 # 1. Clone
-git clone https://github.com/justindouglas/agent-voice-ai.git
+git clone https://github.com/yourname/agent-voice-ai.git
 cd agent-voice-ai
 
 # 2. venv
@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 # 3. Env
 cp .env.example .env
-# Edit .env — at minimum, set ANTHROPIC_API_KEY.
+# Edit .env — at minimum, set BRAIN_API_KEY.
 
 # 4. Run external services (whisper.cpp, piper, ffmpeg)
 # See README.md §"Install" → "External services"
